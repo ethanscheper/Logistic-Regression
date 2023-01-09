@@ -1,0 +1,195 @@
+---
+title: "Commercial Banking Corporation Variable Understanding and Assumptions"
+author: Noah Johnson, Sanket Sahasrabudhe, Ethan Scheper, Elizabeth Surratt, Charis
+  Williams
+date: "8/24/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r var exploration}
+library(tidyverse)
+setwd("/Users/noahjohnson/Downloads")
+insurance_train <- read.csv("insurance_t.csv")
+str(insurance_train)
+facs = c("CASHBK", "DDA","DIRDEP","SAV","ATM","CD","IRA",
+         "LOC", "INV", "ILS","MM","MMCRED", "CC", "CCPURC", "MTG","SDB", 
+         "HMOWN", "MOVED","INAREA","INS", "BRANCH", "RES", "NSF")
+# for (i in 1:ncol(insurance_train)) {
+#     print(colnames(insurance_train)[i])
+#     print(length(unique(insurance_train[,i])))
+#     #insurance_train[,i] <- as.factor(insurance_train[,i])
+# }
+
+insurance_train[facs] <- lapply(insurance_train[facs], factor)
+
+str(insurance_train)
+
+library(glmnet)
+
+#Using individual variable global tests
+binary <- c()
+cont <- c()
+ordinal <- c()
+nominal <- c()
+
+for (i in colnames(insurance_train)) {
+  if (is.factor(insurance_train[,i]) & i != "INS") {
+    if (i %in% c("CCPURC", "NSF", "MMCRED", "CASHBK")) {
+      ordinal = append(ordinal, i)
+    }
+    else if (nlevels(insurance_train[,i]) == 2) {
+      binary = append(binary, i)
+    }
+    else {
+      nominal = append(nominal, i)
+    }
+  }
+  else {
+    if (i != "INS") {
+      cont = append(cont, i)
+    }
+  }
+}
+vars = c()
+pval = c()
+library(vcdExtra)
+library(car)
+for (i in colnames(insurance_train)) {
+  if (i %in% binary | i %in% ordinal) {
+    vars = append(vars, i)
+    pval = append(pval, CMHtest(table(insurance_train[,i], insurance_train$INS))$table[1,3])
+  }
+  else if (i %in% nominal) {
+    vars = append(vars, i)
+    chi <- chisq.test(table(insurance_train[,i], insurance_train$INS))
+    pval = append(pval, chi$p.value)
+  }
+  else if (i %in% cont) {
+    vars = append(vars, i)
+    temp_formula <- formula(paste("INS ~ ", i))
+    temp_model <- glm(temp_formula, data = insurance_train, family = binomial(link = "logit"))
+    pval = append(pval, car::Anova(temp_model, test = "LR", type = "III")[,3])
+  }
+}
+
+first_pval <- as.data.frame(pval)
+first_pval <- cbind(vars, first_pval)
+first_pval <- first_pval %>% mutate(pval = ifelse(pval >= 0.0001, round(pval, digits = 5), format(pval, scientific = TRUE, digits = 5)))
+first_pval <- first_pval %>% arrange(as.numeric(pval))
+first_pval_sig <- first_pval %>% filter(as.numeric(pval) < 0.002)
+
+#Final Table here
+first_pval_sig <- first_pval_sig %>% mutate(type = ifelse(vars %in% binary, "Binary", ifelse(vars %in% ordinal, "Ordinal", ifelse(vars %in% nominal, "Nominal", "Continuous"))))
+```
+
+```{r odds_ratios}
+library(DescTools)
+
+# Creating a vector with all of the binary variables and a data frame to populate with their odds ratios in relation to the target variable (INS)
+odds_ratios <- data.frame(matrix(nrow = length(binary), ncol = 2))
+colnames(odds_ratios) <- c("var", "odds_ratio")
+
+# Using a loop to calculate the odds ratios and put them in the data frame
+for (i in 1:length(binary)) {
+  var_name <- binary[i]
+  odds_ratios$var[i] <- var_name
+  odds_ratios$odds_ratio[i] <- OddsRatio(table(insurance_train[[var_name]], 
+                                               insurance_train$INS))
+}
+
+# Filter to only include those variables that are statistically significant
+odds_ratios <- odds_ratios %>%
+  filter(var %in% first_pval_sig$vars)
+
+# Rank the odds ratios by magnitude
+for (i in 1:nrow(odds_ratios)) {
+  if (odds_ratios$odds_ratio[i] >= 1) {
+    odds_ratios$magnitude[i] <- odds_ratios$odds_ratio[i]
+  }
+  else {
+    odds_ratios$magnitude[i] <- 1 / odds_ratios$odds_ratio[i]
+  }
+}
+odds_ratios <- odds_ratios %>% arrange(desc(magnitude))
+odds_ratios$rank <- 1:nrow(odds_ratios)
+
+# Interpreting the highest magnitude odds ratio. 
+# The odds ratio between INV, the indicator variable for whether or not the account holder has an investment account, and INS, the indicator variable for whether or not the account holder is going to purchase a variable rate annuity product, is approximately 3.472. Account holders who have an investment account are 3.472 times more likely to purchase a variable rate annuity product as compared to those who do not have an investment account. This makes intuitive sense because a variable rate annuity product is also in and of itself an investment. Those who already have an investment account likely have a greater understanding of what they are investing in with a variable rate annuity product or generally have a greater propensity to invest than their counterparts who do not have an investment account.
+
+# Write out the table to a csv file so we can put it in the report
+write.csv(odds_ratios, file = "odds_ratios.csv")
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+# Testing linearity assumptions 
+
+# remove NSF from list of continuous vars since this variable pulls an error b/c it only has 0s and 1s
+cont1 <- cont[cont != "NSF"]
+print(cont1)
+
+
+# for loop for running test with all continuous variables
+for (i in colnames(insurance_train)) {
+  # print(i)
+  if (i %in% cont1) {
+    print(i)
+    temp_logit <- formula(paste("INS ~ ", i))
+    logit_model <- glm(temp_logit,
+                       data = insurance_train, 
+                       family = binomial(link = "logit"))
+
+      temp_gam <- formula(paste("INS ~ s(", i, ")"))
+      fit_model <- mgcv::gam(temp_gam,
+                       data = insurance_train,
+                       family = binomial(),
+                       method = "REML")
+
+      print(anova(logit_model, fit_model, test="Chisq")[2,5]) #printing just pvals
+  }
+}
+
+#subsetting data frame with just linear variables
+linear_vars <- names(insurance_train) %in% c("CRSCORE", "AGE", "HMVAL", "LORES", "INCOME", "CCBAL", "MTGBAL", "LOCBAL", "ACCTAGE")
+linear_vars_df <- insurance_train[linear_vars]
+
+
+
+```
+
+# Plot Missing Values
+```{r}
+library(naniar)
+library(dplyr)
+library(ggplot2)
+# looking at all the variables to see which ones have NA's
+
+colSums(is.na(insurance_train))
+missing <- insurance_train %>% 
+  miss_var_summary()
+
+# making a list of all variables that have NA's
+missingcols <- c("ACCTAGE", "PHONE", "POS", "POSAMT", "INV", "INVBAL", "CC", "CCBAL", "CCPURC", "INCOME", "HMOWN", "LORES", "HMVAL", "AGE", "CRSCORE")
+
+# visual
+gg_miss_var(insurance_train[missingcols]) +
+  ggtitle("Variables with Missing Values") +
+  labs(y = "Number of Missing Values")
+
+# export missing values data to make graph in excel:
+write.csv(missing,"C:/Users/eliza/OneDrive/Documents/R\\missingnas.csv", row.names = FALSE)
+```
+
